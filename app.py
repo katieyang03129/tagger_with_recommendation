@@ -12,6 +12,8 @@ if 'search_results' not in st.session_state:
     st.session_state['search_results'] = None
 if 'ai_keywords_display' not in st.session_state:
     st.session_state['ai_keywords_display'] = []
+if 'user_query_display' not in st.session_state:
+    st.session_state['user_query_display'] = ""
 if 'request_history' not in st.session_state:
     st.session_state['request_history'] = []
 if 'recommendations' not in st.session_state:
@@ -411,8 +413,14 @@ def render_song_card(row, show_match_score=True, show_recommendation_score=False
             st.subheader(f"🎯 {row['song']}" if is_exact else row['song'])
             st.write(f"🎤 {row['artist']}")
 
-            ai_k = st.session_state['ai_keywords_display']
-            matched_tags = [k for k in ai_k if k.lower() in str(row.get('AI_Keywords', '')).lower()]
+            display_keywords = []
+            if st.session_state['user_query_display']:
+                display_keywords.append(st.session_state['user_query_display'])
+            for keyword in st.session_state['ai_keywords_display']:
+                if keyword not in display_keywords:
+                    display_keywords.append(keyword)
+
+            matched_tags = [k for k in display_keywords if k.lower() in str(row.get('AI_Keywords', '')).lower()]
             if matched_tags:
                 st.info(f"✨ 標籤命中：{', '.join(matched_tags)}")
 
@@ -497,6 +505,15 @@ def run_search(query):
                 cleaned_res = res_text.replace("`", "").replace("'", "").replace('"', "")
                 ai_keywords = [k.strip() for k in cleaned_res.split(',') if k.strip()]
 
+            original_keyword = query.strip()
+            search_keywords = []
+            if original_keyword:
+                search_keywords.append(original_keyword)
+            for keyword in ai_keywords:
+                if keyword and keyword not in search_keywords:
+                    search_keywords.append(keyword)
+
+            st.session_state['user_query_display'] = original_keyword
             st.session_state['ai_keywords_display'] = ai_keywords
 
             temp_df = df.copy()
@@ -510,9 +527,12 @@ def run_search(query):
                 if user_query_lower in song_val or song_val in user_query_lower or user_query_lower in artist_val:
                     return 100.0
 
-                if ai_keywords:
+                if user_query_lower and user_query_lower in tag_val:
+                    return 85.0
+
+                if search_keywords:
                     tag_matches = 0
-                    for k in ai_keywords:
+                    for k in search_keywords:
                         keyword = k.lower().strip()
                         if keyword in tag_val or keyword in song_val:
                             tag_matches += 1
@@ -574,9 +594,16 @@ with tab_search:
         run_search(query)
 
     if st.session_state['search_results'] is not None:
-        if st.session_state['ai_keywords_display']:
-            formatted_keywords = ", ".join([f"`{k}`" for k in st.session_state['ai_keywords_display']])
-            st.markdown(f"💡 **AI 解析關鍵字：** {formatted_keywords}")
+        display_keywords = []
+        if st.session_state['user_query_display']:
+            display_keywords.append(st.session_state['user_query_display'])
+        for keyword in st.session_state['ai_keywords_display']:
+            if keyword not in display_keywords:
+                display_keywords.append(keyword)
+
+        if display_keywords:
+            formatted_keywords = ", ".join([f"`{k}`" for k in display_keywords])
+            st.markdown(f"💡 **搜尋 / AI 關鍵字：** {formatted_keywords}")
             st.write("---")
 
         results = st.session_state['search_results']
