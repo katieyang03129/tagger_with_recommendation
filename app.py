@@ -21,8 +21,61 @@ if 'recommendation_title' not in st.session_state:
 
 
 st.set_page_config(page_title="智能點歌台", page_icon="🎵")
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1080px;
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
+
+    h1 {
+        font-size: 2.25rem;
+        letter-spacing: 0;
+    }
+
+    h3 {
+        font-size: 1.15rem;
+        margin-bottom: 0.25rem;
+    }
+
+    [data-testid="stTabs"] [role="tablist"] {
+        gap: 0.5rem;
+        border-bottom: 1px solid rgba(120, 120, 120, 0.22);
+    }
+
+    [data-testid="stTabs"] [role="tab"] {
+        padding: 0.75rem 1rem;
+        border-radius: 0.5rem 0.5rem 0 0;
+    }
+
+    [data-testid="stTabs"] [aria-selected="true"] {
+        background: rgba(255, 75, 75, 0.09);
+    }
+
+    [data-testid="stButton"] button,
+    [data-testid="stLinkButton"] a {
+        border-radius: 0.45rem;
+        font-weight: 600;
+    }
+
+    [data-testid="stTextInput"] input {
+        border-radius: 0.45rem;
+    }
+
+    [data-testid="stMetric"] {
+        background: rgba(120, 120, 120, 0.08);
+        border: 1px solid rgba(120, 120, 120, 0.16);
+        border-radius: 0.5rem;
+        padding: 0.65rem 0.85rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 st.title("智能點歌台 🎵")
-st.caption("AI 語意搜尋 + 最近點歌偏好推薦版")
+st.caption("AI 語意搜尋 + 最近點歌偏好推薦 App")
 
 
 # --- STEP 2: AI 配置與資料庫讀取 ---
@@ -95,9 +148,15 @@ def normalize_text(value):
 
 def split_terms(value):
     text = normalize_text(value)
-    for symbol in ["，", "、", "/", "|", ";", "；"]:
+    for symbol in ["，", "、", "/", "|", ";", "；", " "]:
         text = text.replace(symbol, ",")
     return [term.strip() for term in text.split(",") if term.strip()]
+
+
+def terms_are_related(left, right):
+    if not left or not right:
+        return False
+    return left == right or left in right or right in left
 
 
 def get_song_id(row):
@@ -253,8 +312,11 @@ def recommendation_score(row, profile, requested_ids):
     if scene_column:
         row_terms.update(split_terms(row.get(scene_column, "")))
 
+    song_text = normalize_text(row.get('song', ""))
+    artist_text = normalize_text(row.get('artist', ""))
     for term, count in profile["terms"].items():
-        if term in row_terms or term in normalize_text(row.get('song', "")):
+        has_related_term = any(terms_are_related(term, row_term) for row_term in row_terms)
+        if has_related_term or term in song_text or term in artist_text:
             score += min(25, 8 * count)
 
     era = infer_era(row)
@@ -313,6 +375,15 @@ def refresh_recommendations(dataframe):
         axis=1
     )
     recommendations = candidate_df[candidate_df['recommendation_score'] > 0]
+
+    if recommendations.empty:
+        fallback_df = candidate_df[
+            ~candidate_df.apply(lambda row: get_song_id(row) in requested_ids, axis=1)
+        ].copy()
+        fallback_df['recommendation_score'] = 1.0
+        fallback_df['recommendation_reason'] = "先推薦資料庫中尚未點過的歌曲"
+        recommendations = fallback_df
+
     recommendations = recommendations.sort_values(by='recommendation_score', ascending=False)
 
     st.session_state['recommendation_title'] = create_recommendation_title(profile)
@@ -333,7 +404,7 @@ def add_to_request_history(row):
 
 
 def render_song_card(row, show_match_score=True, show_recommendation_score=False, key_prefix="song"):
-    with st.container():
+    with st.container(border=True):
         c1, c2 = st.columns([3, 1])
         with c1:
             is_exact = show_match_score and row.get('match_score', 0) == 100.0
@@ -360,120 +431,19 @@ def render_song_card(row, show_match_score=True, show_recommendation_score=False
                 add_to_request_history(row)
                 st.success("已加入點歌紀錄")
                 st.rerun()
-    st.divider()
 
 
-# --- STEP 4: 搜尋介面佈局 (文字框 + 語音按鈕) ---
-col1, col2 = st.columns([6, 4])
+def render_recommendation_section():
+    if df is None or not st.session_state['request_history']:
+        st.info("先到「智能搜尋」加入幾首歌，這裡就會開始出現推薦。")
+        return
 
-with col1:
-    query = st.text_input(
-        "search_input",
-        value=st.session_state['voice_output'],
-        placeholder="搜尋歌手、歌名或心情 (例如：王菲 空靈)...",
-        label_visibility="collapsed"
-    )
+    total_requests = len(st.session_state['request_history'])
+    recommendation_count = len(st.session_state['recommendations'])
+    metric_a, metric_b = st.columns(2)
+    metric_a.metric("最近點歌", f"{total_requests} 首")
+    metric_b.metric("本次推薦", f"{recommendation_count} 首")
 
-with col2:
-    voice_text = speech_to_text(
-        language='zh-TW',
-        start_prompt="🎙️ 語音輸入",
-        stop_prompt="🛑 輸入中...完成請點我",
-        key='mic_recorder'
-    )
-
-
-# --- STEP 5: 處理語音輸入狀態與回傳 ---
-if st.session_state.get('mic_recorder') is not None and not voice_text:
-    st.markdown("💬 :red[語音輸入中...請開始說話]")
-
-if voice_text and voice_text != st.session_state['voice_output']:
-    st.session_state['voice_output'] = voice_text
-    st.rerun()
-
-
-search_trigger = st.button("🔍 開始搜尋", type="primary", use_container_width=True)
-
-
-# --- STEP 6: 核心搜尋與權重運算邏輯 ---
-if search_trigger and query:
-    if df is not None:
-        with st.spinner('🤖 AI 正在精準媒合中...'):
-            try:
-                res_text = get_ai_keywords(query)
-
-                if "API_ERROR" in res_text or not res_text or res_text.strip() == "":
-                    ai_keywords = []
-                else:
-                    cleaned_res = res_text.replace("`", "").replace("'", "").replace('"', "")
-                    ai_keywords = [k.strip() for k in cleaned_res.split(',') if k.strip()]
-
-                st.session_state['ai_keywords_display'] = ai_keywords
-
-                temp_df = df.copy()
-                user_query_lower = query.lower().strip()
-
-                def calculate_score(row):
-                    artist_val = str(row['artist']).lower().strip()
-                    song_val = str(row['song']).lower().strip()
-                    tag_val = str(row['AI_Keywords']).lower().strip()
-
-                    if user_query_lower in song_val or song_val in user_query_lower or user_query_lower in artist_val:
-                        return 100.0
-
-                    if ai_keywords:
-                        tag_matches = 0
-                        for k in ai_keywords:
-                            keyword = k.lower().strip()
-                            if keyword in tag_val or keyword in song_val:
-                                tag_matches += 1
-
-                        if tag_matches == 1:
-                            return 40.0
-                        if tag_matches == 2:
-                            return 70.0
-                        if tag_matches >= 3:
-                            return 90.0
-
-                    return 0.0
-
-                temp_df['match_score'] = temp_df.apply(calculate_score, axis=1)
-                temp_df = temp_df.reset_index()
-                final_results = temp_df[temp_df['match_score'] > 0].sort_values(
-                    by=['match_score', 'index'],
-                    ascending=[False, True]
-                )
-                st.session_state['search_results'] = final_results
-
-            except Exception as e:
-                st.error(f"搜尋過程中發生錯誤：{e}")
-    else:
-        st.error("找不到歌曲資料庫 (CSV)。")
-
-
-# --- STEP 7: 結果顯示區 ---
-if st.session_state['search_results'] is not None:
-    if st.session_state['ai_keywords_display']:
-        formatted_keywords = ", ".join([f"`{k}`" for k in st.session_state['ai_keywords_display']])
-        st.markdown(f"💡 **AI 解析關鍵字：** {formatted_keywords}")
-        st.write("---")
-
-    results = st.session_state['search_results']
-
-    if not results.empty:
-        st.success(f"🔍 為妳精選了 {len(results)} 首歌曲（僅顯示前 50 首）：")
-
-        for _, row in results.head(50).iterrows():
-            render_song_card(row, show_match_score=True, key_prefix="search")
-    else:
-        st.warning("💔 沒找到符合的歌曲，換個關鍵字試試看？")
-elif df is not None:
-    st.info(f"目前資料庫共有 {len(df)} 首歌。請輸入心情或歌手開始點歌！")
-
-
-# --- STEP 8: 猜你也喜歡推薦區 ---
-if df is not None and st.session_state['request_history']:
-    st.write("---")
     st.subheader(st.session_state['recommendation_title'])
 
     recent_labels = [
@@ -488,4 +458,144 @@ if df is not None and st.session_state['request_history']:
         for _, row in recommendations.iterrows():
             render_song_card(row, show_match_score=False, show_recommendation_score=True, key_prefix="recommendation")
     else:
-        st.info("再多加入幾首歌，我就能更準地推薦。")
+        st.info("已記錄點歌，但目前還沒有足夠資料產生推薦。可以再加入幾首歌，或確認 CSV 的 AI_Keywords 欄位有標籤。")
+
+
+def render_queue_section():
+    if not st.session_state['request_history']:
+        st.info("目前還沒有點歌。到「智能搜尋」或「猜你也喜歡」加入歌曲後，這裡會顯示最近點歌。")
+        return
+
+    st.subheader("已點歌單")
+    queue_df = pd.DataFrame(st.session_state['request_history'])
+    queue_df = queue_df.tail(30).iloc[::-1].reset_index(drop=True)
+    queue_df.index = queue_df.index + 1
+    st.dataframe(
+        queue_df[['song', 'artist']].rename(columns={'song': '歌曲', 'artist': '歌手'}),
+        use_container_width=True
+    )
+
+    if st.button("清除全部點歌紀錄", type="secondary", use_container_width=True):
+        st.session_state['request_history'] = []
+        st.session_state['recommendations'] = pd.DataFrame()
+        st.session_state['recommendation_title'] = "猜你也喜歡"
+        st.rerun()
+
+
+def run_search(query):
+    if df is None:
+        st.error("找不到歌曲資料庫 (CSV)。")
+        return
+
+    with st.spinner('🤖 AI 正在精準媒合中...'):
+        try:
+            res_text = get_ai_keywords(query)
+
+            if "API_ERROR" in res_text or not res_text or res_text.strip() == "":
+                ai_keywords = []
+            else:
+                cleaned_res = res_text.replace("`", "").replace("'", "").replace('"', "")
+                ai_keywords = [k.strip() for k in cleaned_res.split(',') if k.strip()]
+
+            st.session_state['ai_keywords_display'] = ai_keywords
+
+            temp_df = df.copy()
+            user_query_lower = query.lower().strip()
+
+            def calculate_score(row):
+                artist_val = str(row['artist']).lower().strip()
+                song_val = str(row['song']).lower().strip()
+                tag_val = str(row['AI_Keywords']).lower().strip()
+
+                if user_query_lower in song_val or song_val in user_query_lower or user_query_lower in artist_val:
+                    return 100.0
+
+                if ai_keywords:
+                    tag_matches = 0
+                    for k in ai_keywords:
+                        keyword = k.lower().strip()
+                        if keyword in tag_val or keyword in song_val:
+                            tag_matches += 1
+
+                    if tag_matches == 1:
+                        return 40.0
+                    if tag_matches == 2:
+                        return 70.0
+                    if tag_matches >= 3:
+                        return 90.0
+
+                return 0.0
+
+            temp_df['match_score'] = temp_df.apply(calculate_score, axis=1)
+            temp_df = temp_df.reset_index()
+            final_results = temp_df[temp_df['match_score'] > 0].sort_values(
+                by=['match_score', 'index'],
+                ascending=[False, True]
+            )
+            st.session_state['search_results'] = final_results
+
+        except Exception as e:
+            st.error(f"搜尋過程中發生錯誤：{e}")
+
+
+tab_search, tab_recommend, tab_queue = st.tabs(["智能搜尋", "猜你也喜歡", "已點歌單"])
+
+
+with tab_search:
+    st.subheader("想唱什麼？")
+    col1, col2 = st.columns([6, 4])
+
+    with col1:
+        query = st.text_input(
+            "search_input",
+            value=st.session_state['voice_output'],
+            placeholder="搜尋歌手、歌名或心情 (例如：王菲 空靈)...",
+            label_visibility="collapsed"
+        )
+
+    with col2:
+        voice_text = speech_to_text(
+            language='zh-TW',
+            start_prompt="🎙️ 語音輸入",
+            stop_prompt="🛑 輸入中...完成請點我",
+            key='mic_recorder'
+        )
+
+    if st.session_state.get('mic_recorder') is not None and not voice_text:
+        st.markdown("💬 :red[語音輸入中...請開始說話]")
+
+    if voice_text and voice_text != st.session_state['voice_output']:
+        st.session_state['voice_output'] = voice_text
+        st.rerun()
+
+    search_trigger = st.button("🔍 開始搜尋", type="primary", use_container_width=True)
+
+    if search_trigger and query:
+        run_search(query)
+
+    if st.session_state['search_results'] is not None:
+        if st.session_state['ai_keywords_display']:
+            formatted_keywords = ", ".join([f"`{k}`" for k in st.session_state['ai_keywords_display']])
+            st.markdown(f"💡 **AI 解析關鍵字：** {formatted_keywords}")
+            st.write("---")
+
+        results = st.session_state['search_results']
+
+        if not results.empty:
+            st.success(f"🔍 為妳精選了 {len(results)} 首歌曲（僅顯示前 50 首）：")
+
+            for _, row in results.head(50).iterrows():
+                render_song_card(row, show_match_score=True, key_prefix="search")
+        else:
+            st.warning("💔 沒找到符合的歌曲，換個關鍵字試試看？")
+    elif df is not None:
+        st.info(f"目前資料庫共有 {len(df)} 首歌。請輸入心情或歌手開始點歌！")
+
+
+with tab_recommend:
+    st.subheader("依照最近點歌推薦")
+    render_recommendation_section()
+
+
+with tab_queue:
+    render_queue_section()
