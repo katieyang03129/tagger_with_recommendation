@@ -153,6 +153,16 @@ DISTINCTIVE_RECOMMENDATION_TERMS = {
     "療癒", "healing", "細膩", "delicate", "溫柔", "warm",
 }
 
+ETHEREAL_CORE_TERMS = {
+    "空靈", "ethereal", "夢幻", "dreamy", "清澈", "clean", "純淨", "pure",
+    "airy", "療癒", "healing", "soft_vocal", "mellow", "piano", "strings",
+}
+
+CONTRAST_TERMS = {
+    "electronic", "edm", "dance_pop", "party", "fast", "fast tempo", "快速節奏",
+    "theatrical", "戲劇化", "narrative", "synth", "percussion", "hiphop",
+}
+
 
 def first_existing_column(dataframe, candidates):
     for column in candidates:
@@ -210,6 +220,23 @@ def ranked_profile_terms(profile, require_distinctive=False):
             continue
         ranked.append((term, count * weight, count, weight))
     return sorted(ranked, key=lambda item: (item[1], item[2]), reverse=True)
+
+
+def core_profile_terms(profile):
+    strong_terms = []
+    for term, _, count, weight in ranked_profile_terms(profile, require_distinctive=True):
+        normalized = normalize_text(term)
+        if count >= 2 or normalized in ETHEREAL_CORE_TERMS or weight >= 3:
+            strong_terms.append(term)
+    return strong_terms[:6]
+
+
+def related_term_count(target_terms, profile_terms):
+    count = 0
+    for profile_term in profile_terms:
+        if any(terms_are_related(profile_term, target_term) for target_term in target_terms):
+            count += 1
+    return count
 
 
 def terms_are_related(left, right):
@@ -439,6 +466,8 @@ def recommendation_score(row, profile, requested_ids):
 
     song_text = normalize_text(row.get('song', ""))
     artist_text = normalize_text(row.get('artist', ""))
+    core_terms = core_profile_terms(profile)
+    core_matches = related_term_count(row_terms, core_terms)
     tag_score = 0.0
     for term, count in profile["terms"].items():
         has_related_term = any(terms_are_related(term, row_term) for row_term in row_terms)
@@ -475,7 +504,21 @@ def recommendation_score(row, profile, requested_ids):
     if popularity is not None:
         score += min(10, popularity * 10 if popularity <= 1 else popularity / 10)
 
-    return round(min(score, 100), 2)
+    has_ethereal_profile = any(
+        normalize_text(term) in ETHEREAL_CORE_TERMS
+        for term in core_terms
+    )
+    if has_ethereal_profile:
+        if core_matches == 0:
+            score -= 28
+        elif core_matches == 1:
+            score -= 10
+
+        contrast_matches = related_term_count(row_terms, CONTRAST_TERMS)
+        if contrast_matches:
+            score -= min(24, 10 * contrast_matches)
+
+    return round(min(max(score, 0), 100), 2)
 
 
 def refresh_recommendations(dataframe):
@@ -504,6 +547,8 @@ def refresh_recommendations(dataframe):
         axis=1
     )
     recommendations = candidate_df[candidate_df['recommendation_score'] > 0]
+    if core_profile_terms(profile):
+        recommendations = recommendations[recommendations['recommendation_score'] >= 35]
 
     if recommendations.empty:
         fallback_df = candidate_df[
