@@ -142,6 +142,17 @@ GENERIC_RECOMMENDATION_TERMS = {
     "華語", "中文", "國語", "流行", "歌曲", "歌手", "男聲", "女聲",
 }
 
+BROAD_RECOMMENDATION_TERMS = {
+    "mandopop", "ballad", "pop_ballad", "pop", "中文歌", "英文歌", "韓文歌", "日文歌",
+    "karaoke", "ktv", "2010s", "2020s", "2000s", "2010年代", "2020年代", "2000年代",
+}
+
+DISTINCTIVE_RECOMMENDATION_TERMS = {
+    "空靈", "ethereal", "夢幻", "dreamy", "清澈", "clean", "純淨", "pure",
+    "airy", "清亮", "bright_vocal", "bright", "soft_vocal", "mellow",
+    "療癒", "healing", "細膩", "delicate", "溫柔", "warm",
+}
+
 
 def first_existing_column(dataframe, candidates):
     for column in candidates:
@@ -176,6 +187,29 @@ def meaningful_terms(value):
         for term in split_terms(value)
         if not is_generic_recommendation_term(term)
     ]
+
+
+def term_weight(term):
+    normalized = normalize_text(term)
+    if normalized in DISTINCTIVE_RECOMMENDATION_TERMS:
+        return 3.0
+    if normalized in BROAD_RECOMMENDATION_TERMS:
+        return 0.35
+    if any(marker in normalized for marker in ["ethereal", "dream", "clean", "airy", "空靈", "夢幻", "純淨", "清澈"]):
+        return 3.0
+    if any(marker in normalized for marker in ["mandopop", "ballad", "karaoke"]):
+        return 0.5
+    return 1.0
+
+
+def ranked_profile_terms(profile, require_distinctive=False):
+    ranked = []
+    for term, count in profile["terms"].items():
+        weight = term_weight(term)
+        if require_distinctive and weight < 1:
+            continue
+        ranked.append((term, count * weight, count, weight))
+    return sorted(ranked, key=lambda item: (item[1], item[2]), reverse=True)
 
 
 def terms_are_related(left, right):
@@ -267,6 +301,9 @@ def build_feature_profile(rows):
         genre_column = first_existing_column(pd.DataFrame([row]), ['genre', 'genres', '曲風'])
         mood_column = first_existing_column(pd.DataFrame([row]), ['mood', 'moods', '情緒'])
         scene_column = first_existing_column(pd.DataFrame([row]), ['scene', 'scenes', '場景'])
+        instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
+        vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
+        recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
 
         terms = meaningful_terms(tag_text)
         if genre_column:
@@ -275,6 +312,12 @@ def build_feature_profile(rows):
             terms.extend(meaningful_terms(row.get(mood_column, "")))
         if scene_column:
             terms.extend(meaningful_terms(row.get(scene_column, "")))
+        if instrument_column:
+            terms.extend(meaningful_terms(row.get(instrument_column, "")))
+        if vocal_column:
+            terms.extend(meaningful_terms(row.get(vocal_column, "")))
+        if recommendation_column:
+            terms.extend(meaningful_terms(row.get(recommendation_column, "")))
 
         for term in terms:
             profile["terms"][term] = profile["terms"].get(term, 0) + 1
@@ -303,16 +346,22 @@ def average(values):
 
 
 def create_recommendation_title(profile):
-    era = top_key(profile["eras"])
     terms = [
         term
-        for term, _ in sorted(profile["terms"].items(), key=lambda item: item[1], reverse=True)[:2]
+        for term, _, _, _ in ranked_profile_terms(profile, require_distinctive=True)[:3]
     ]
+    if not terms:
+        terms = [
+            term
+            for term, _, _, _ in ranked_profile_terms(profile)[:2]
+        ]
 
     title_parts = []
-    if era:
-        title_parts.append(era.replace("s", "年代"))
     title_parts.extend(terms)
+    if not title_parts:
+        era = top_key(profile["eras"])
+        if era:
+            title_parts.append(era.replace("s", "年代"))
 
     if title_parts:
         return "猜你也喜歡：" + " ".join(title_parts)
@@ -321,17 +370,28 @@ def create_recommendation_title(profile):
 
 def create_recommendation_reason(row, profile):
     reasons = []
-    era = infer_era(row)
-    preferred_era = top_key(profile["eras"])
-    if era and preferred_era and era == preferred_era:
-        reasons.append(era.replace("s", "年代"))
-
     row_terms = set(meaningful_terms(row.get('AI_Keywords', "")))
+    genre_column = first_existing_column(pd.DataFrame([row]), ['genre', 'genres', '曲風'])
+    mood_column = first_existing_column(pd.DataFrame([row]), ['mood', 'moods', '情緒'])
+    scene_column = first_existing_column(pd.DataFrame([row]), ['scene', 'scenes', '場景'])
+    instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
+    vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
+    recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
+    for column in [genre_column, mood_column, scene_column, instrument_column, vocal_column, recommendation_column]:
+        if column:
+            row_terms.update(meaningful_terms(row.get(column, "")))
+
     matched_terms = [
         term
-        for term, _ in sorted(profile["terms"].items(), key=lambda item: item[1], reverse=True)
-        if term in row_terms
-    ][:2]
+        for term, _, _, _ in ranked_profile_terms(profile, require_distinctive=True)
+        if any(terms_are_related(term, row_term) for row_term in row_terms)
+    ][:3]
+    if not matched_terms:
+        matched_terms = [
+            term
+            for term, _, _, _ in ranked_profile_terms(profile)
+            if any(terms_are_related(term, row_term) for row_term in row_terms)
+        ][:2]
     reasons.extend(matched_terms)
 
     preferred_language = top_key(profile["languages"])
@@ -367,6 +427,15 @@ def recommendation_score(row, profile, requested_ids):
         row_terms.update(meaningful_terms(row.get(mood_column, "")))
     if scene_column:
         row_terms.update(meaningful_terms(row.get(scene_column, "")))
+    instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
+    vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
+    recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
+    if instrument_column:
+        row_terms.update(meaningful_terms(row.get(instrument_column, "")))
+    if vocal_column:
+        row_terms.update(meaningful_terms(row.get(vocal_column, "")))
+    if recommendation_column:
+        row_terms.update(meaningful_terms(row.get(recommendation_column, "")))
 
     song_text = normalize_text(row.get('song', ""))
     artist_text = normalize_text(row.get('artist', ""))
@@ -374,22 +443,22 @@ def recommendation_score(row, profile, requested_ids):
     for term, count in profile["terms"].items():
         has_related_term = any(terms_are_related(term, row_term) for row_term in row_terms)
         if has_related_term or term in song_text or term in artist_text:
-            tag_score += min(12, 4 * count)
+            tag_score += min(18, 4 * count * term_weight(term))
 
-    score += min(40, tag_score)
+    score += min(65, tag_score)
 
     if artist_text and artist_text in profile["artists"]:
-        score += 18
+        score += 10
 
     era = infer_era(row)
     preferred_era = top_key(profile["eras"])
     if era and preferred_era and era == preferred_era:
-        score += 20
+        score += 6
 
     preferred_language = top_key(profile["languages"])
     language = get_language(row)
     if language and preferred_language and language == preferred_language:
-        score += 18
+        score += 8
 
     preferred_bpm = average(profile["bpms"])
     row_bpm = get_numeric_feature(row, ['bpm', 'BPM', 'tempo'])
