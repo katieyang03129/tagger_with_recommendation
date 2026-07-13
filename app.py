@@ -598,7 +598,38 @@ def refresh_recommendations(dataframe):
         return
 
     profile = build_feature_profile(history_rows.tail(10))
-    candidate_df = dataframe.copy()
+    requested_mask = dataframe['_song_id'].isin(requested_ids)
+    candidate_mask = ~requested_mask
+    ranked_terms = [
+        term
+        for term, _, _, _ in ranked_profile_terms(profile, require_distinctive=True)[:8]
+    ]
+    if not ranked_terms:
+        ranked_terms = [
+            term
+            for term, _, _, _ in ranked_profile_terms(profile)[:8]
+        ]
+
+    term_mask = pd.Series(False, index=dataframe.index)
+    for term in ranked_terms:
+        term = normalize_text(term)
+        if not term:
+            continue
+        term_mask = term_mask | dataframe['_search_text'].str.contains(term, regex=False, na=False)
+
+    preferred_language = top_key(profile["languages"])
+    if preferred_language:
+        term_mask = term_mask | (dataframe['_language_fast'] == preferred_language)
+
+    preferred_era = top_key(profile["eras"])
+    if preferred_era:
+        term_mask = term_mask | (dataframe['_era_fast'] == preferred_era)
+
+    candidate_indexes = dataframe[candidate_mask & term_mask].index[:800]
+    if len(candidate_indexes) == 0:
+        candidate_indexes = dataframe[candidate_mask].index[:200]
+
+    candidate_df = dataframe.loc[candidate_indexes].copy()
     candidate_df['recommendation_score'] = candidate_df.apply(
         lambda row: recommendation_score(row, profile, requested_ids),
         axis=1
@@ -608,7 +639,7 @@ def refresh_recommendations(dataframe):
         recommendations = recommendations[recommendations['recommendation_score'] >= 35]
 
     if recommendations.empty:
-        fallback_df = candidate_df[~candidate_df['_song_id'].isin(requested_ids)].copy()
+        fallback_df = dataframe[candidate_mask].head(10).copy()
         fallback_df['recommendation_score'] = 1.0
         fallback_df['recommendation_reason'] = "先推薦資料庫中尚未點過的歌曲"
         recommendations = fallback_df
