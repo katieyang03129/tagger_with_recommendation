@@ -82,11 +82,25 @@ st.caption("AI 語意搜尋 + 最近點歌偏好推薦 App")
 
 
 # --- STEP 2: AI 配置與資料庫讀取 ---
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel('models/gemini-3.1-flash-lite')
+def get_secret_value(name, default=""):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
+GEMINI_API_KEY = get_secret_value("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('models/gemini-3.1-flash-lite')
+else:
+    model = None
 
 
 def get_ai_keywords(user_query):
+    if model is None:
+        return user_query
+
     prompt = f"""
     你是一個強大的音樂語意分析大腦。
     請理解用戶輸入的「情境或句子」，將其轉化為 3 個與音樂相關的標籤（風格、情緒、特徵）。
@@ -109,7 +123,10 @@ def get_ai_keywords(user_query):
 def load_data():
     file_path = "songs_with_tags.csv"
     if os.path.exists(file_path):
-        df = pd.read_csv(file_path, encoding='utf-8-sig')
+        try:
+            df = pd.read_csv(file_path, encoding='utf-8-sig')
+        except pd.errors.ParserError:
+            df = pd.read_csv(file_path, encoding='utf-8-sig', engine='python', on_bad_lines='skip')
         df.columns = df.columns.str.strip()
         for column in ['song', 'artist', 'youtube_id', 'AI_Keywords']:
             if column not in df.columns:
@@ -731,46 +748,50 @@ def run_search(query):
             st.session_state['user_query_display'] = original_keyword
             st.session_state['ai_keywords_display'] = ai_keywords
 
-            temp_df = df.copy()
             user_query_lower = query.lower().strip()
 
-            temp_df['match_score'] = 0.0
+            scores = pd.Series(0.0, index=df.index)
             if user_query_lower:
                 exact_mask = (
-                    temp_df['_song_lower'].str.contains(user_query_lower, regex=False, na=False)
-                    | temp_df['_artist_lower'].str.contains(user_query_lower, regex=False, na=False)
+                    df['_song_lower'].str.contains(user_query_lower, regex=False, na=False)
+                    | df['_artist_lower'].str.contains(user_query_lower, regex=False, na=False)
                 )
-                tag_mask = temp_df['_tag_lower'].str.contains(user_query_lower, regex=False, na=False)
-                temp_df.loc[tag_mask, 'match_score'] = 85.0
-                temp_df.loc[exact_mask, 'match_score'] = 100.0
+                tag_mask = df['_tag_lower'].str.contains(user_query_lower, regex=False, na=False)
+                scores.loc[tag_mask] = 85.0
+                scores.loc[exact_mask] = 100.0
 
             if search_keywords:
-                match_counts = pd.Series(0, index=temp_df.index)
+                match_counts = pd.Series(0, index=df.index)
                 for keyword in search_keywords:
                     keyword = keyword.lower().strip()
                     if not keyword:
                         continue
                     keyword_mask = (
-                        temp_df['_tag_lower'].str.contains(keyword, regex=False, na=False)
-                        | temp_df['_song_lower'].str.contains(keyword, regex=False, na=False)
-                        | temp_df['_artist_lower'].str.contains(keyword, regex=False, na=False)
+                        df['_tag_lower'].str.contains(keyword, regex=False, na=False)
+                        | df['_song_lower'].str.contains(keyword, regex=False, na=False)
+                        | df['_artist_lower'].str.contains(keyword, regex=False, na=False)
                     )
                     match_counts += keyword_mask.astype(int)
 
-                keyword_score = pd.Series(0.0, index=temp_df.index)
+                keyword_score = pd.Series(0.0, index=df.index)
                 keyword_score = keyword_score.mask(match_counts == 1, 40.0)
                 keyword_score = keyword_score.mask(match_counts == 2, 70.0)
                 keyword_score = keyword_score.mask(match_counts >= 3, 90.0)
-                temp_df['match_score'] = temp_df['match_score'].where(
-                    temp_df['match_score'] > keyword_score,
+                scores = scores.where(
+                    scores > keyword_score,
                     keyword_score
                 )
 
-            temp_df = temp_df.reset_index()
-            final_results = temp_df[temp_df['match_score'] > 0].sort_values(
-                by=['match_score', 'index'],
+            score_table = pd.DataFrame({
+                "match_score": scores[scores > 0],
+                "original_index": scores[scores > 0].index,
+            }).sort_values(
+                by=["match_score", "original_index"],
                 ascending=[False, True]
             )
+            top_indexes = score_table.head(200).index
+            final_results = df.loc[top_indexes].copy()
+            final_results["match_score"] = score_table.loc[top_indexes, "match_score"].values
             st.session_state['search_results'] = final_results
 
         except Exception as e:
