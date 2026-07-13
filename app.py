@@ -111,6 +111,92 @@ def load_data():
     if os.path.exists(file_path):
         df = pd.read_csv(file_path, encoding='utf-8-sig')
         df.columns = df.columns.str.strip()
+        for column in ['song', 'artist', 'youtube_id', 'AI_Keywords']:
+            if column not in df.columns:
+                df[column] = ""
+            df[column] = df[column].fillna("").astype(str)
+
+        def _norm(value):
+            if pd.isna(value):
+                return ""
+            return str(value).lower().strip()
+
+        def _split(value):
+            text = _norm(value)
+            for symbol in ["，", "、", "/", "|", ";", "；", " "]:
+                text = text.replace(symbol, ",")
+            return [term.strip() for term in text.split(",") if len(term.strip()) > 1]
+
+        def _first_existing(candidates):
+            for column in candidates:
+                if column in df.columns:
+                    return column
+            return None
+
+        year_column = _first_existing(['year', '年份', 'release_year'])
+        language_column = _first_existing(['language', '語言'])
+        era_column = _first_existing(['era', '年代'])
+        term_columns = [
+            column for column in [
+                'AI_Keywords',
+                _first_existing(['genre', 'genres', '曲風']),
+                _first_existing(['mood', 'moods', '情緒']),
+                _first_existing(['scene', 'scenes', '場景']),
+                _first_existing(['instrumentation', '樂器', '編曲']),
+                _first_existing(['vocal_features', '唱腔', '聲線']),
+                _first_existing(['recommendation_tags']),
+            ]
+            if column
+        ]
+
+        df['_song_id'] = df['artist'].astype(str) + "::" + df['song'].astype(str)
+        df['_song_lower'] = df['song'].map(_norm)
+        df['_artist_lower'] = df['artist'].map(_norm)
+        df['_tag_lower'] = df['AI_Keywords'].map(_norm)
+        df['_search_text'] = (
+            df['_song_lower'] + " " + df['_artist_lower'] + " " + df['_tag_lower']
+        )
+
+        def _infer_language(row):
+            if language_column:
+                value = _norm(row.get(language_column, ""))
+                if value:
+                    return value
+            text = f"{row.get('song', '')} {row.get('artist', '')} {row.get('AI_Keywords', '')}"
+            if re.search(r"[\u4e00-\u9fff]", text):
+                return "zh"
+            if re.search(r"[ぁ-んァ-ン]", text):
+                return "ja"
+            if re.search(r"[가-힣]", text):
+                return "ko"
+            if re.search(r"[A-Za-z]", text):
+                return "en"
+            return ""
+
+        def _infer_era(row):
+            if era_column:
+                value = _norm(row.get(era_column, ""))
+                if value:
+                    return value
+            if not year_column:
+                return ""
+            try:
+                year = int(float(row.get(year_column)))
+                return f"{year // 10 * 10}s"
+            except (TypeError, ValueError):
+                return ""
+
+        def _all_terms(row):
+            terms = []
+            for column in term_columns:
+                for term in _split(row.get(column, "")):
+                    if term not in terms:
+                        terms.append(term)
+            return terms
+
+        df['_language_fast'] = df.apply(_infer_language, axis=1)
+        df['_era_fast'] = df.apply(_infer_era, axis=1)
+        df['_all_terms'] = df.apply(_all_terms, axis=1)
         return df
     return None
 
@@ -259,6 +345,8 @@ def infer_language_from_text(*values):
 
 
 def get_language(row):
+    if '_language_fast' in row and pd.notna(row['_language_fast']):
+        return row['_language_fast']
     language_column = first_existing_column(pd.DataFrame([row]), ['language', '語言'])
     if language_column:
         language = normalize_text(row.get(language_column, ""))
@@ -268,12 +356,16 @@ def get_language(row):
 
 
 def get_song_id(row):
+    if '_song_id' in row and pd.notna(row['_song_id']):
+        return str(row['_song_id'])
     if 'song_id' in row and pd.notna(row['song_id']):
         return str(row['song_id'])
     return f"{row.get('artist', '')}::{row.get('song', '')}"
 
 
 def infer_era(row):
+    if '_era_fast' in row and pd.notna(row['_era_fast']):
+        return row['_era_fast']
     era_column = first_existing_column(pd.DataFrame([row]), ['era', '年代'])
     if era_column:
         era_value = normalize_text(row.get(era_column, ""))
@@ -324,27 +416,9 @@ def build_feature_profile(rows):
         if artist:
             profile["artists"][artist] = profile["artists"].get(artist, 0) + 1
 
-        tag_text = row.get('AI_Keywords', "")
-        genre_column = first_existing_column(pd.DataFrame([row]), ['genre', 'genres', '曲風'])
-        mood_column = first_existing_column(pd.DataFrame([row]), ['mood', 'moods', '情緒'])
-        scene_column = first_existing_column(pd.DataFrame([row]), ['scene', 'scenes', '場景'])
-        instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
-        vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
-        recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
-
-        terms = meaningful_terms(tag_text)
-        if genre_column:
-            terms.extend(meaningful_terms(row.get(genre_column, "")))
-        if mood_column:
-            terms.extend(meaningful_terms(row.get(mood_column, "")))
-        if scene_column:
-            terms.extend(meaningful_terms(row.get(scene_column, "")))
-        if instrument_column:
-            terms.extend(meaningful_terms(row.get(instrument_column, "")))
-        if vocal_column:
-            terms.extend(meaningful_terms(row.get(vocal_column, "")))
-        if recommendation_column:
-            terms.extend(meaningful_terms(row.get(recommendation_column, "")))
+        terms = row.get('_all_terms', None)
+        if not isinstance(terms, list):
+            terms = meaningful_terms(row.get('AI_Keywords', ""))
 
         for term in terms:
             profile["terms"][term] = profile["terms"].get(term, 0) + 1
@@ -397,16 +471,7 @@ def create_recommendation_title(profile):
 
 def create_recommendation_reason(row, profile):
     reasons = []
-    row_terms = set(meaningful_terms(row.get('AI_Keywords', "")))
-    genre_column = first_existing_column(pd.DataFrame([row]), ['genre', 'genres', '曲風'])
-    mood_column = first_existing_column(pd.DataFrame([row]), ['mood', 'moods', '情緒'])
-    scene_column = first_existing_column(pd.DataFrame([row]), ['scene', 'scenes', '場景'])
-    instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
-    vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
-    recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
-    for column in [genre_column, mood_column, scene_column, instrument_column, vocal_column, recommendation_column]:
-        if column:
-            row_terms.update(meaningful_terms(row.get(column, "")))
+    row_terms = set(row.get('_all_terms', []) if isinstance(row.get('_all_terms', []), list) else meaningful_terms(row.get('AI_Keywords', "")))
 
     matched_terms = [
         term
@@ -443,26 +508,7 @@ def recommendation_score(row, profile, requested_ids):
         return -9999.0
 
     score = 0.0
-    row_terms = set(meaningful_terms(row.get('AI_Keywords', "")))
-
-    genre_column = first_existing_column(pd.DataFrame([row]), ['genre', 'genres', '曲風'])
-    mood_column = first_existing_column(pd.DataFrame([row]), ['mood', 'moods', '情緒'])
-    scene_column = first_existing_column(pd.DataFrame([row]), ['scene', 'scenes', '場景'])
-    if genre_column:
-        row_terms.update(meaningful_terms(row.get(genre_column, "")))
-    if mood_column:
-        row_terms.update(meaningful_terms(row.get(mood_column, "")))
-    if scene_column:
-        row_terms.update(meaningful_terms(row.get(scene_column, "")))
-    instrument_column = first_existing_column(pd.DataFrame([row]), ['instrumentation', '樂器', '編曲'])
-    vocal_column = first_existing_column(pd.DataFrame([row]), ['vocal_features', '唱腔', '聲線'])
-    recommendation_column = first_existing_column(pd.DataFrame([row]), ['recommendation_tags'])
-    if instrument_column:
-        row_terms.update(meaningful_terms(row.get(instrument_column, "")))
-    if vocal_column:
-        row_terms.update(meaningful_terms(row.get(vocal_column, "")))
-    if recommendation_column:
-        row_terms.update(meaningful_terms(row.get(recommendation_column, "")))
+    row_terms = set(row.get('_all_terms', []) if isinstance(row.get('_all_terms', []), list) else meaningful_terms(row.get('AI_Keywords', "")))
 
     song_text = normalize_text(row.get('song', ""))
     artist_text = normalize_text(row.get('artist', ""))
@@ -528,9 +574,7 @@ def refresh_recommendations(dataframe):
         return
 
     requested_ids = {item['song_id'] for item in history}
-    history_rows = dataframe[
-        dataframe.apply(lambda row: get_song_id(row) in requested_ids, axis=1)
-    ]
+    history_rows = dataframe[dataframe['_song_id'].isin(requested_ids)]
 
     if history_rows.empty:
         st.session_state['recommendations'] = pd.DataFrame()
@@ -542,26 +586,25 @@ def refresh_recommendations(dataframe):
         lambda row: recommendation_score(row, profile, requested_ids),
         axis=1
     )
-    candidate_df['recommendation_reason'] = candidate_df.apply(
-        lambda row: create_recommendation_reason(row, profile),
-        axis=1
-    )
     recommendations = candidate_df[candidate_df['recommendation_score'] > 0]
     if core_profile_terms(profile):
         recommendations = recommendations[recommendations['recommendation_score'] >= 35]
 
     if recommendations.empty:
-        fallback_df = candidate_df[
-            ~candidate_df.apply(lambda row: get_song_id(row) in requested_ids, axis=1)
-        ].copy()
+        fallback_df = candidate_df[~candidate_df['_song_id'].isin(requested_ids)].copy()
         fallback_df['recommendation_score'] = 1.0
         fallback_df['recommendation_reason'] = "先推薦資料庫中尚未點過的歌曲"
         recommendations = fallback_df
 
     recommendations = recommendations.sort_values(by='recommendation_score', ascending=False)
+    recommendations = recommendations.head(10).copy()
+    recommendations['recommendation_reason'] = recommendations.apply(
+        lambda row: create_recommendation_reason(row, profile),
+        axis=1
+    )
 
     st.session_state['recommendation_title'] = create_recommendation_title(profile)
-    st.session_state['recommendations'] = recommendations.head(10)
+    st.session_state['recommendations'] = recommendations
 
 
 def add_to_request_history(row):
@@ -691,34 +734,38 @@ def run_search(query):
             temp_df = df.copy()
             user_query_lower = query.lower().strip()
 
-            def calculate_score(row):
-                artist_val = str(row['artist']).lower().strip()
-                song_val = str(row['song']).lower().strip()
-                tag_val = str(row['AI_Keywords']).lower().strip()
+            temp_df['match_score'] = 0.0
+            if user_query_lower:
+                exact_mask = (
+                    temp_df['_song_lower'].str.contains(user_query_lower, regex=False, na=False)
+                    | temp_df['_artist_lower'].str.contains(user_query_lower, regex=False, na=False)
+                )
+                tag_mask = temp_df['_tag_lower'].str.contains(user_query_lower, regex=False, na=False)
+                temp_df.loc[tag_mask, 'match_score'] = 85.0
+                temp_df.loc[exact_mask, 'match_score'] = 100.0
 
-                if user_query_lower in song_val or song_val in user_query_lower or user_query_lower in artist_val:
-                    return 100.0
+            if search_keywords:
+                match_counts = pd.Series(0, index=temp_df.index)
+                for keyword in search_keywords:
+                    keyword = keyword.lower().strip()
+                    if not keyword:
+                        continue
+                    keyword_mask = (
+                        temp_df['_tag_lower'].str.contains(keyword, regex=False, na=False)
+                        | temp_df['_song_lower'].str.contains(keyword, regex=False, na=False)
+                        | temp_df['_artist_lower'].str.contains(keyword, regex=False, na=False)
+                    )
+                    match_counts += keyword_mask.astype(int)
 
-                if user_query_lower and user_query_lower in tag_val:
-                    return 85.0
+                keyword_score = pd.Series(0.0, index=temp_df.index)
+                keyword_score = keyword_score.mask(match_counts == 1, 40.0)
+                keyword_score = keyword_score.mask(match_counts == 2, 70.0)
+                keyword_score = keyword_score.mask(match_counts >= 3, 90.0)
+                temp_df['match_score'] = temp_df['match_score'].where(
+                    temp_df['match_score'] > keyword_score,
+                    keyword_score
+                )
 
-                if search_keywords:
-                    tag_matches = 0
-                    for k in search_keywords:
-                        keyword = k.lower().strip()
-                        if keyword in tag_val or keyword in song_val:
-                            tag_matches += 1
-
-                    if tag_matches == 1:
-                        return 40.0
-                    if tag_matches == 2:
-                        return 70.0
-                    if tag_matches >= 3:
-                        return 90.0
-
-                return 0.0
-
-            temp_df['match_score'] = temp_df.apply(calculate_score, axis=1)
             temp_df = temp_df.reset_index()
             final_results = temp_df[temp_df['match_score'] > 0].sort_values(
                 by=['match_score', 'index'],
@@ -781,9 +828,15 @@ with tab_search:
         results = st.session_state['search_results']
 
         if not results.empty:
-            st.success(f"🔍 為妳精選了 {len(results)} 首歌曲（僅顯示前 50 首）：")
+            display_limit = st.selectbox(
+                "顯示數量",
+                options=[12, 24, 50],
+                index=0,
+                label_visibility="collapsed"
+            )
+            st.success(f"🔍 為妳精選了 {len(results)} 首歌曲（目前顯示前 {display_limit} 首）：")
 
-            for _, row in results.head(50).iterrows():
+            for _, row in results.head(display_limit).iterrows():
                 render_song_card(row, show_match_score=True, key_prefix="search")
         else:
             st.warning("💔 沒找到符合的歌曲，換個關鍵字試試看？")
